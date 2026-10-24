@@ -1,0 +1,201 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "charcha-comments",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-23",
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+
+  // The embed ships as a static asset rather than from a Worker route (#5).
+  // "Requests to static assets are free and unlimited. Requests to the Worker script
+  // [...] are billed according to Workers pricing"
+  // (https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/,
+  // checked 2026-07-24). After the read-path work in #20 it is the request count and
+  // not the database that bounds a site on the free tier, so serving embed.js from
+  // the Worker would make every page view cost two requests instead of one and halve
+  // a site's ceiling from ~100k to ~50k page views a day.
+  //
+  // Every default here is load-bearing and deliberately left unset:
+  //   - `run_worker_first` defaults to false. Setting it — for any pattern covering
+  //     embed.js — makes those requests invoke and bill the Worker, which is exactly
+  //     the cost this binding exists to avoid.
+  //   - `not_found_handling` defaults to "none". Cloudflare serves a matching asset
+  //     without invoking the Worker and otherwise falls through to it, which is what
+  //     keeps GET/POST/OPTIONS /comments and /health reaching Hono. The
+  //     "single-page-application" and "404-page" modes send navigation requests
+  //     straight to asset serving instead, and would break the read path.
+  // https://developers.cloudflare.com/workers/static-assets/routing/worker-script/
+  "assets": {
+    "directory": "./public"
+  },
+
+  // public/embed.js is a build output and is gitignored, so it has to be built
+  // before the directory above is uploaded. Wrangler runs this before `deploy` and
+  // watches it during `dev`.
+  //
+  // **Workers Builds does not honour this** — "Currently, Workers Builds does not
+  // honor the configurations set in Custom Builds within your Wrangler configuration
+  // file" (https://developers.cloudflare.com/workers/ci-cd/builds/configuration/,
+  // checked 2026-07-24). What covers the Deploy button instead is the `build` script
+  // in package.json, which the button detects and pre-populates
+  // (https://developers.cloudflare.com/workers/platform/deploy-buttons/). Both exist
+  // because they cover different paths, not by duplication.
+  "build": {
+    "command": "pnpm build"
+  },
+
+  // Daily retention janitor: nulls comments.ip_hash past the configured window so
+  // the IP-derived identifier does not live in the database forever (#19). One
+  // trigger, well inside the Free plan's 5-per-account limit. The window itself is
+  // the `ip_hash_retention_days` setting, not this schedule.
+  "triggers": {
+    "crons": ["0 4 * * *"]
+  },
+
+  // The login throttle (#12). `POST /admin/api/session` is a public,
+  // unauthenticated endpoint guarding the one credential that can delete every
+  // comment on the site, so it needs a brute-force bound — and it must not be #8's
+  // rate-limit layer. That one counts rows in `comments` by `ip_hash`, and a login
+  // attempt writes no comment row; a D1-backed attempt counter would mean one write
+  // per failed attempt, so a brute-forcer at 10 req/s spends 864k writes/day against
+  // a 100k/day budget and takes commenting down site-wide. This binding stores
+  // nothing and costs nothing.
+  //
+  // "Rate limits that you define and enforce in your Worker are local to the
+  // Cloudflare location that your Worker runs in" and the counters are "permissive,
+  // eventually consistent, and intentionally designed to not be used as an accurate
+  // accounting system" — which is the right trade for a login throttle and the wrong
+  // one for a quota. `period` must be 10 or 60; there is no other value.
+  // https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/
+  // GA since 2025-09-19: https://developers.cloudflare.com/changelog/2025-09-19-ratelimit-workers-ga/
+  // Both checked 2026-07-25.
+  //
+  // **Free-plan availability is undocumented, and #119 established that it is
+  // undocumented rather than merely unread.** Checked 2026-07-25: the binding
+  // reference says nothing about plans, the bindings index says nothing about which
+  // bindings a plan gates, the Workers pricing page — which does carry a
+  // Free-vs-Paid table for Workers, KV, Hyperdrive, Queues, Workflows, D1, Durable
+  // Objects, Vectorize, R2 and Containers — does not mention rate limiting at all,
+  // and the GA changelog mentions no plan. It is also not in the Deploy button's
+  // list of provisioned resources (that list is KV, D1, R2, Hyperdrive, Vectorize,
+  // Secrets Store, Durable Objects, Workers AI, Queues). That last omission is
+  // expected rather than evidence: the binding is declared entirely here and needs
+  // no provisioning.
+  // https://developers.cloudflare.com/workers/platform/pricing/
+  // https://developers.cloudflare.com/workers/runtime-apis/bindings/
+  //
+  // So the honest state is *unknown*, and it stays unknown until someone deploys to
+  // a real Workers Free account — the owner check on #119.
+  //
+  // What #119's own preferred fallback cannot be is the Cache API. One half of that
+  // is documented outright: "For Workers fronted by Cloudflare Access, the Cache API
+  // is not currently available", and Access is #108. The other half is an
+  // *inference* from an enumeration, and is flagged as one rather than quoted as
+  // fact — "Workers deployed to custom domains have access to functional `cache`
+  // operations. So do Pages functions, whether attached to custom domains or
+  // `*.pages.dev` domains." `*.workers.dev` is conspicuously not in that list, and a
+  // one-click deploy lands there. A counter that stores nothing reads as zero
+  // attempts forever, which is the #107 failure again, so the option is treated as
+  // closed pending someone measuring it.
+  // https://developers.cloudflare.com/workers/runtime-apis/cache/ (2026-07-25)
+  //
+  // Nothing here is changed on a guess. A plan gate would fail `wrangler deploy`
+  // for every one-click deployer, and README's deploy troubleshooting names the
+  // symptom and what to do, because a stranger reading a wrangler error cannot
+  // otherwise know that this is the line to delete.
+  "ratelimits": [
+    {
+      "name": "LOGIN_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        // Ten attempts a minute per client. A person mistyping their own password
+        // does not reach it; a script is stopped at three orders of magnitude
+        // below what guessing a real secret would need.
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ],
+
+  // The spam classifier's embedding model (#10, layer 6). "Unlike other bindings,
+  // this binding is limited to one AI binding per Worker project."
+  // https://developers.cloudflare.com/workers/wrangler/configuration/ (checked 2026-07-29)
+  //
+  // **It is here rather than only in a type declaration because the Deploy button
+  // reads this file**, and "Workers AI" is on its list of automatically provisioned
+  // resources — so a one-click deployment gets the binding without the deployer doing
+  // anything, and layer 6 needs no secret and no setup step. That is also why the
+  // classifier is a *local* layer in the sense CLAUDE.md means: inference runs in the
+  // deployer's own account, and no comment is sent to a third party.
+  // https://developers.cloudflare.com/workers/platform/deploy-buttons/ (checked 2026-07-29)
+  //
+  // **There is no local simulation of this binding, and that is why nothing in the
+  // test suite touches it.** "By default, bindings connect to local resource
+  // simulations (except for AI bindings, as AI models always run remotely)", and
+  // using Workers AI "always accesses your Cloudflare account [...] and will incur
+  // usage charges even in local development"
+  // (https://developers.cloudflare.com/workers/development-testing/, checked
+  // 2026-07-29). A test that reached `env.AI` would therefore need account
+  // credentials and would spend real neurons on every CI run. So `createSpamCheck`
+  // takes the binding as an argument and every test passes a stand-in — see
+  // src/spam/classifier.ts, and test/worker/spam/classifier.test.ts for the
+  // assertion that an absent binding abstains rather than throwing.
+  //
+  // **`remote: true` states a fact rather than choosing anything.** It has no effect
+  // on a deployed Worker — it describes what a *local* run connects to, and for this
+  // binding there is no other answer: "If a Workers AI binding has `remote` set to
+  // `false`, Cloudflare will produce an error. If the property is omitted, Cloudflare
+  // will connect to the remote resource and issue a warning to add the property to
+  // configuration." Omitting it printed that warning twice on every `pnpm test`, which
+  // is noise on a line nobody can act on. Saying it out loud is also the more honest
+  // record: `wrangler dev` against this file reaches the owner's real account and
+  // spends real neurons.
+  //
+  // **Which is why package.json's `dev` script is `wrangler dev --local`.** Plain
+  // `wrangler dev` now refuses to start at all without a CLOUDFLARE_API_TOKEN —
+  // "Failed to start the remote proxy session" before the first request — because it
+  // opens the remote session for this binding eagerly. That would make a Cloudflare
+  // account a prerequisite for running this project locally, which it has never been.
+  // `--local` is documented as "Run locally with remote bindings disabled", and under
+  // it `env.AI.run` throws, src/spam/embed.ts catches, and layer 6 abstains — which is
+  // the same path a deployment with no Workers AI takes and is covered by tests.
+  // Drop the flag, with credentials, to exercise the classifier for real.
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+
+  // The Deploy to Cloudflare button reads this file to decide what to provision,
+  // and rewrites `database_id` with the ID of the database it creates. The value
+  // below is a placeholder that exists only so the binding is well-formed before
+  // any deployment has happened. Cloudflare's instruction is to "make sure your
+  // source repository includes default values for resource names, resource IDs and
+  // any other properties for each binding"; what it does with a binding that has
+  // none is not documented, and the placeholder means nobody has to find out.
+  //
+  // **Cloudflare creates the database and does not migrate it.** Applying migrations
+  // is the repository's job, "as part of your `deploy` script", which is why
+  // package.json's `deploy` runs `wrangler d1 migrations apply DB --remote` before
+  // `wrangler deploy`, joined by `&&` — the order and the `&&` together are what
+  // make a failed migration a red build rather than a live Worker querying an empty
+  // database. Both are asserted, ordering and separator, by
+  // test/node/deploy-config.test.ts.
+  //
+  // The migration target is the *binding* `DB` and not the database name, on
+  // Cloudflare's explicit instruction: "The migration command should reference the
+  // binding name rather than the database name to ensure migrations are successful
+  // when users specify a database name that is different from that of your source
+  // repository" — the deploy form lets a deployer rename the database, and
+  // `database_name` below is only this repository's default. Also asserted by
+  // test/node/deploy-config.test.ts, against the binding declared here.
+  // https://developers.cloudflare.com/workers/platform/deploy-buttons/ (2026-07-25)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "charcha-comments",
+      "database_id": "1f2f4d9d-429d-4ba0-8d3c-250ef0efbdaf"
+    }
+  ]
+}

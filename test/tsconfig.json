@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "types": ["@cloudflare/vitest-pool-workers/types", "node"]
+  },
+  "include": ["./**/*.ts", "../vitest.config.ts", "../src/worker-configuration.d.ts"],
+  // test/dom and test/dashboard are the browser half: they import src/embed and
+  // src/dashboard, and need the DOM lib without the Worker's ambient types, which
+  // this project supplies. Each has its own project — test/dom/tsconfig.json and
+  // test/dashboard/tsconfig.json — and `pnpm typecheck` runs all of them.
+  "exclude": ["./dom", "./dashboard"]
+}

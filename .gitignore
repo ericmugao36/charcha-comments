@@ -1,0 +1,50 @@
+node_modules/
+dist/
+.wrangler/
+
+# The built embed. Source is src/embed/; `pnpm build` produces this, and both
+# `wrangler dev` and `wrangler deploy` run that build first (wrangler.jsonc). A
+# committed bundle would drift from its source with nothing failing (#5).
+public/embed.js
+public/embed.js.map
+
+# The built moderation dashboard. Source is src/dashboard/; `pnpm build` produces
+# both files, and `wrangler dev` and `wrangler deploy` run that build first
+# (wrangler.jsonc). They are static assets so the browser fetches them free of
+# Worker billing, and a committed bundle would drift from its source with nothing
+# failing (#13).
+public/admin/
+.dev.vars
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+coverage/
+.turbo/
+
+# Local machine config: hooks and permissions belong to a developer, not to a repo
+# whose root Cloudflare treats as a deploy root.
+.claude/settings.local.json
+# Agent worktrees are whole nested checkouts of this repo (#54).
+.claude/worktrees/
+
+# Scratch written by the superpowers skills. Design lives in the GitHub issue, so
+# plan files must never be committed here.
+.superpowers/
+
+# Scratch written by the improve skill: audit findings turned into implementation
+# plans. Same rule as .superpowers/ above, and the same reason — but this one is
+# the directory that actually gets large, so the rule being remembered rather
+# than enforced was a `git add -A` away from committing thousands of lines of
+# spec files in one go (#222).
+plans/
+
+# Local product record for design sessions (impeccable). Contains positioning,
+# which CLAUDE.md forbids in this public repo.
+PRODUCT.md
+.impeccable/
+
+# Product context for the impeccable skill. Strategy and positioning —
+# CLAUDE.md forbids publishing it, and this repo is public.
+PRODUCT.md

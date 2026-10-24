@@ -1,0 +1,652 @@
+# Charcha
+
+Self-hosted comments for static sites. Deploys to your own Cloudflare account in
+one click, runs inside the Cloudflare free tier, and requires no account from
+readers in order to comment.
+
+> **Status: v1 in progress.** The comment path, the embed, the moderation
+> dashboard, email notifications, the spam layers — including the self-training
+> Workers AI classifier ([#10](https://github.com/withsetu/charcha/issues/10)) and
+> the optional Akismet provider ([#11](https://github.com/withsetu/charcha/issues/11))
+> — and the deploy flow are built and deployed. The Disqus importer
+> ([#15](https://github.com/withsetu/charcha/issues/15)) and the full documentation
+> ([#17](https://github.com/withsetu/charcha/issues/17)) are not. The v1 plan is
+> [issue #1](https://github.com/withsetu/charcha/issues/1).
+
+## What it is
+
+- **Zero ops** — one click to deploy, resources auto-provisioned. No server, no
+  database to administer.
+- **Free to run** — a typical blog stays inside the Cloudflare free tier
+  indefinitely.
+- **No reader accounts** — a name and an optional email. No sign-up, no social
+  login.
+- **No cookies, ever** — nothing is stored in the reader's browser at all, so a site
+  using Charcha has nothing new to disclose. Not a default that can be switched:
+  anything that appears to need reader-side storage needs a different design. The one
+  thing that can put a third party in the page is Cloudflare Turnstile, which is off
+  until you configure it and is [documented plainly](docs/theming.md#turnstile) when
+  you do.
+- **Invisible on the page** — the widget inherits the host site's typography and
+  colours, including dark mode.
+- **Spam defence that runs locally** — layered heuristics and an on-device
+  classifier by default. Third-party spam services are optional and off by
+  default, because they mean sending reader data elsewhere.
+
+## Deploying it
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/withsetu/charcha)
+
+Cloudflare clones this repository into your own GitHub or GitLab account, creates
+the D1 database, asks you for the secrets below, builds, and deploys. You end up
+with a Worker on `your-worker.your-subdomain.workers.dev` and a repository you can
+keep developing from — later pushes to it redeploy.
+
+### The secrets it asks for
+
+**Two, and both want a real value.** Fill them in and you are done — everything else
+Charcha can do is off until you turn it on, and none of it is asked for here.
+
+| Secret | What it is |
+|---|---|
+| `CHARCHA_DASHBOARD_PASSWORD` | The only credential for the moderation dashboard at `/admin`. No account, no reset, and no second user. Generate it — `openssl rand -base64 24` — and make it **at least 15 characters**; see [how long it should be](#how-long-the-dashboard-password-should-be). Unset, the dashboard **refuses every request including its own login**: comments still arrive and nobody can moderate them. |
+| `IP_HASH_SECRET` | The key that turns a commenter's IP into the identifier the per-IP spam rate limit counts. **Any long random string** — `openssl rand -hex 32` if you have a terminal open. It is an HMAC key, not a credential registered with anything, so nothing has to recognise it. Unset, no IP is stored at all and the per-IP half of the rate limit stops running. |
+
+They are declared in [`.dev.vars.example`](.dev.vars.example), which is the file the
+deploy form is built from, with the help text beside each field coming from
+`cloudflare.bindings` in `package.json`. Both are Cloudflare's
+[documented mechanism](https://developers.cloudflare.com/workers/platform/deploy-buttons/).
+
+#### Why the optional ones are not on that form
+
+The deploy form **requires a value in every field it shows**, and there is no
+documented way to mark one optional
+([cloudflare/workers-sdk#14075](https://github.com/cloudflare/workers-sdk/issues/14075)).
+For `TURNSTILE_SECRET_KEY` that is a trap rather than an inconvenience: the only thing
+a deployer can do with a mandatory field they have no value for is invent one, and an
+invented Turnstile secret matches no widget — so no page on their site can produce a
+token, and **every comment arrives with nothing to check and is held for review**. The
+queue fills with comments that look perfectly fine, nothing anywhere says why, and it
+stays that way until someone thinks to look at that field again
+([#104](https://github.com/withsetu/charcha/issues/104)). Holding rather than refusing is
+the deliberate behaviour — it loses nobody's comment — but it is quieter than a refusal
+and no easier to diagnose.
+
+So the form asks only for the two secrets above, which are the two where a value is
+genuinely needed *and* any value you supply is safe. The optional features are set
+afterwards, one command each, below. `pnpm check:deploy` enforces that split: a secret
+the code reads must be either collected by the form **or** documented here as a
+`wrangler secret put`, with no third option, and a help text left behind by a field
+that no longer exists fails too.
+
+### Turning on the optional features
+
+Nothing about the deploy form is a one-time chance, and none of these has to be decided
+during it. Run these from a checkout of your deployed repository — or set the same
+names in the Cloudflare dashboard, in your Worker under **Settings → Variables and
+Secrets**. Each takes effect on the next request; there is nothing to redeploy.
+
+**The invisible bot check ([Turnstile](https://developers.cloudflare.com/turnstile/get-started/)) — the one worth doing.**
+It is the only layer that asks for evidence rather than for the absence of a problem. The
+honeypot, the two-second typing floor and the link count all measure what a comment is
+*not*, and a script written against this form passes every one of them; rate limiting, the
+one layer that is not a judgement about the comment, bounds how many arrive rather than
+whether any of them is real. Turnstile asks for a token that only a browser which solved a
+real challenge can produce. It is also free — Cloudflare's free plan is
+[unlimited verification requests](https://developers.cloudflare.com/turnstile/plans/),
+up to 20 widgets, checked 2026-07-29 — and it is on the Cloudflare account you already
+have, because deploying Charcha needed one.
+
+A Turnstile widget has **two keys, and they are not interchangeable**:
+
+- the **sitekey**, which is public, goes in your page's HTML as
+  `data-turnstile-sitekey`, and is what puts the widget on the page;
+- the **secret key**, which is private, goes in the Worker, and is what lets the Worker
+  check the widget's answer.
+
+Create a widget at **Cloudflare dashboard → Turnstile → Add widget**. It gives you both,
+and both have to be set — one command, and one attribute on the page you already pasted
+the embed into:
+
+```sh
+pnpm wrangler secret put TURNSTILE_SECRET_KEY
+```
+
+```html
+<div id="charcha" data-turnstile-sitekey="your-sitekey"></div>
+```
+
+Set both halves or neither. A secret key with no sitekey on the page means every
+comment arrives with no token to verify: those are **held for review** rather than
+refused, so the symptom is a moderation queue filling with comments that look perfectly
+fine ([#104](https://github.com/withsetu/charcha/issues/104)). They are not unmarked —
+each one carries `turnstile: no-token-unverified-deployment` as its held reason in the
+queue, which is how you tell this from a quiet week. Once one real token has
+verified on your deployment, a comment arriving without one is refused instead. A sitekey
+with no secret key is the harmless direction: the widget renders, the Worker ignores it,
+and comments carry on as though Turnstile were off. Your dashboard's
+**Setup** tab reports which half the Worker has — it cannot see your pages, so the sitekey
+half is yours to confirm.
+
+Turnstile is also the one thing that can put a third party in your reader's browser, which
+is why it is off until you do this and [documented plainly](docs/theming.md#turnstile)
+when you do.
+
+**An email when a comment arrives.** A key and two addresses, together, or the feature is
+simply off — a key with no recipient has nowhere to send, and Charcha has no owner
+address anywhere in its schema to guess one from.
+
+The key is a credential, so it is set the same way the others are:
+
+```sh
+pnpm wrangler secret put RESEND_API_KEY
+```
+
+**The two addresses are not secrets, and are set in your dashboard instead** — open
+**Setup** and fill in *Send notifications to* and *Send them from*. They are the public
+address of your own inbox and an address on a domain you verified; treating them as
+credentials cost a terminal and a redeploy to change a value printed on your own site.
+There is a third, optional field beside them: a **sender name**, which is what your mail
+client shows instead of the bare address — `maya.build comments <comments@maya.build>`
+rather than `comments@maya.build`.
+
+The *from* address must be on a domain
+[verified in Resend](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain)
+under the same account as the key — Resend's own `resend.dev` sender can only mail your
+Resend account's own address, and anything else is answered 403. The *to* address is your
+inbox, and it is the only address Charcha ever mails; clearing that field is how you stop
+the emails, because there is no unsubscribe link and nobody to unsubscribe but you.
+**Check both addresses for typos before you save them.** The failure mode is silence,
+and silence is indistinguishable from the feature being switched off.
+
+> **Upgrading from a version that used secrets for these?** `CHARCHA_NOTIFY_FROM` and
+> `CHARCHA_NOTIFY_TO` are still read, so nothing stopped working — but only until you save
+> the matching field in **Setup**, which then wins. Save them there and remove the old
+> secrets with `pnpm wrangler secret delete CHARCHA_NOTIFY_FROM` and
+> `pnpm wrangler secret delete CHARCHA_NOTIFY_TO`. Your Worker's log carries one line
+> saying so while a deployment is still on the old path. The fallback will be removed.
+
+What arrives is one short plain-text email per comment: the page, the commenter's name,
+an excerpt, and a reminder to open the queue. It is sent after the reader's comment has
+already been accepted and stored, so nothing about email can cost anyone their comment —
+and a notification that fails to send is **dropped rather than retried**, because
+retrying a provider that is refusing you makes a bad day worse on your own sending
+domain. A burst is bounded for the same reason: roughly five emails back to back and
+then one every fifteen minutes, per running copy of your Worker, which means a busy
+site can exceed that overall. The next email that does go out says how many comments
+arrived while it was quiet.
+
+The comment is in the moderation queue either way. Email is a prompt to go and look;
+the dashboard is the record, and it is never the thing that missed one.
+
+Enabling this sends the commenter's display name and an excerpt of their comment to
+Resend, a third party. It does not send their email address or anything derived from
+their IP. If your site has a privacy notice, that first sentence is the one that belongs
+in it.
+
+**Third-party spam checking (Akismet) — the one to read about before you switch it on.**
+Charcha's spam defence is eight layers deep, and the first seven run inside your Worker and
+transmit nothing about your readers to anybody. This is the eighth, and it is the
+exception: every comment that reaches it is posted to
+[Akismet](https://akismet.com), a service run by Automattic, carrying
+
+- the commenter's **IP address in full** — Akismet requires it, and it is the address
+  rather than the hash the rate limit stores;
+- their name, and their email address if they gave one;
+- the whole text of their comment;
+- their browser's user-agent string, and the page they were referred from;
+- the page they commented on, and your site's home URL.
+
+That is a disclosure you take on, and it covers readers whose comments you later delete,
+because the check happens before the comment is stored.
+[docs/spam-providers.md](docs/spam-providers.md) lists every field, has a paragraph you
+can paste into a privacy notice, and says what is deliberately *not* sent.
+
+What it buys is a **held** comment, never a refused one — layer 8 can only put something
+in your moderation queue with `provider: akismet` as its reason, never turn a reader away.
+It runs last, so it only ever sees comments the seven free layers could not decide, and it
+is skipped altogether for a comment something else already held: Akismet's Pro plan is
+[500 checks a month](https://akismet.com/pricing/) at $9.95 billed yearly (checked
+2026-07-29), and an anonymous visitor must not be able to spend them. If Akismet is down,
+slow, or your subscription lapses, the layer simply has no opinion — nobody loses a
+comment over it.
+
+Two things, and either alone leaves the layer off. The key is a credential:
+
+```sh
+pnpm wrangler secret put AKISMET_API_KEY
+```
+
+**Your site's address is not**, so it is a field in your dashboard: open **Setup** and fill
+in *Your site's address*. It is your home page — `https://example.com`, or
+`https://you.github.io/blog` if your site lives at a path. Akismet requires it and matches
+it against the sites authorised on your key. Nothing can derive it for you: your Worker's
+own address is a `workers.dev` URL rather than your site, and the URL the embed reports is
+chosen by whoever posted the comment. Setting one of the two without the other leaves the
+layer off and writes one line to your Worker's log saying which half is missing.
+
+> **Upgrading from a version that used a secret for this?** `CHARCHA_SITE_URL` is still
+> read, so nothing stopped working — but only until you save *Your site's address* in
+> **Setup**, which then wins. Save it there and remove the old secret with
+> `pnpm wrangler secret delete CHARCHA_SITE_URL`. The fallback will be removed.
+
+Turning it off again is `pnpm wrangler secret delete AKISMET_API_KEY`. The other seven
+layers do not know it existed.
+
+### Changing a secret afterwards
+
+The same command replaces one:
+
+```sh
+pnpm wrangler secret put CHARCHA_DASHBOARD_PASSWORD
+```
+
+Changing the dashboard password also signs out every open session, because sessions are
+signed with a key derived from it rather than stored. That is the only revocation lever
+there is — there are no per-session controls to revoke with — so it is worth knowing
+rather than discovering mid-triage.
+
+#### How long the dashboard password should be
+
+**At least 15 characters**, which is the minimum
+[NIST states](https://pages.nist.gov/800-63-4/sp800-63b.html) for a password used as a
+single-factor authentication mechanism. This one has no second factor, no second user
+and no reset, and everything behind it can approve, hide and delete every comment on
+your site. `openssl rand -base64 24` produces 32 characters and is the recommendation
+everywhere else in this file for that reason.
+
+**Nothing refuses a shorter one** — not the deploy form, which has no validation hook at
+all, and emphatically not the login. A length floor enforced at sign-in would lock every
+deployment already running on a short password out of its own dashboard, permanently and
+with no way back in, and it would arrive as a routine update. So the check is an
+advisory in one place only: the dashboard's **Setup** tab grows a *Dashboard password*
+section when the configured value is under 15 characters, telling you this and giving
+you the command above. A deployment that clears the floor — 15 characters counts — has no
+such section, so the absence of one is the answer rather than a missing feature.
+
+It is a length check and only a length check. A sixteen-character password that appears
+in a breach corpus passes it and is no safer; nothing in Charcha compares your password
+against a blocklist, and no composition rule is imposed either — the same NIST document
+says verifiers "SHALL NOT impose other composition rules". Generating the value is what
+settles both, which is why every instruction here says to.
+
+### Deploying from a terminal instead
+
+```sh
+pnpm install
+pnpm wrangler d1 create charcha    # then put the returned id in wrangler.jsonc
+pnpm run deploy                    # applies migrations, then deploys
+pnpm wrangler secret put CHARCHA_DASHBOARD_PASSWORD
+```
+
+`pnpm run deploy` and not `pnpm deploy` — the latter is pnpm's own built-in
+workspace-deploy command, which shadows the script and does something else entirely.
+
+That script is deliberately not just `wrangler deploy`: Cloudflare creates the D1
+database but never migrates it, so the migration runs first and a failure there stops
+the deploy instead of publishing a Worker that queries an empty database.
+
+## After it deploys
+
+Open the Worker URL Cloudflare gives you. `/` answers with a short page saying Charcha
+is running. That is the whole of what it says, and it is deliberate: the address is
+public and unauthenticated, so it reports no database state, no configuration, no
+comment counts and not even where your dashboard is. A page that told a passing scanner
+that your deployment was half-broken and where its login was would be doing the
+scanner's work for it. Everything you actually need is here instead, in a README that
+is not published per deployment.
+
+Then three things, none of which take long:
+
+1. **Sign in to the dashboard**, at `/admin` on the same address —
+   `https://your-worker.example.workers.dev/admin`. The password is
+   `CHARCHA_DASHBOARD_PASSWORD`.
+2. **Tell it your site's address**, on the Setup tab — `https://example.com`, scheme
+   included, no trailing path. Until you do, comments from your site are refused: a fresh
+   deployment has been told about no address but its own, and Charcha will not take
+   comments for a site nobody has said is yours. The dashboard says so in as many words
+   while it is true. (**Allowed origins** takes the same kind of address and does the same
+   job for a second one — a staging host, say. Either is enough.)
+3. **Paste [the snippet](#adding-it-to-a-page) into your page**, with your Worker's
+   address in place of the example one.
+
+That is a working install, and skipping everything below still leaves a site that takes
+comments rather than a broken form.
+
+**Then do the bot check.** It is the one optional feature worth going out of your way for:
+every other check that looks at a comment measures the absence of something wrong — an
+untouched honeypot, more than two seconds spent typing, not too many links — and a script
+written against this form passes all of it. [Turnstile](#turning-on-the-optional-features)
+asks for a token only a browser that solved a real challenge can produce. It is free,
+unmetered, and on the Cloudflare account you have just deployed to.
+
+**Cloudflare dashboard → Turnstile → Add widget** gives you two keys, and it needs both:
+
+- the **secret key** goes on the Worker —
+  `pnpm wrangler secret put TURNSTILE_SECRET_KEY`;
+- the **sitekey** goes on your page as `data-turnstile-sitekey`, on the same element you
+  pasted in step 3.
+
+The secret without the sitekey is
+[#104](https://github.com/withsetu/charcha/issues/104): nothing on your page can produce a
+token, so every comment is held for review, marked with the reason
+`turnstile: no-token-unverified-deployment` in the queue. The sitekey without the secret is
+the harmless direction — the widget renders, the Worker ignores it, and comments carry on.
+
+Email notifications are the other optional feature, and that one you can genuinely take or
+leave. [Turning on the optional features](#turning-on-the-optional-features) has both, at
+length.
+
+If you want to check the deployment from a script rather than a browser, `/health`
+answers JSON, and it distinguishes the three states that matter:
+
+| | |
+|---|---|
+| `200 {"status":"ok","database":"ok"}` | Running, and the `comments` table exists — so the first migration ran. |
+| `503 {"status":"degraded","database":"unmigrated"}` | The database exists and Charcha's tables do not. This is what a deploy whose migration step failed looks like — see [the troubleshooting entry](#troubleshooting-a-deploy) for `no such table: comments`. |
+| `503 {"status":"degraded","database":"unreachable"}` | The D1 binding itself refused the query. |
+
+The middle row is why the endpoint changed: it used to run `select 1`, which an
+unmigrated database answers perfectly, so it reported `ok` on the one failure a
+one-click deploy actually produces
+([#141](https://github.com/withsetu/charcha/issues/141)). `database: "error"` no longer
+appears; `unreachable` replaced it.
+
+**A 200 is not proof that every migration ran**, and the wording of that first row is
+careful for a reason: the check looks for one table, so a migration set that failed
+partway through a later step still answers `ok`. The build log is what settles that
+([#149](https://github.com/withsetu/charcha/issues/149) is the issue for closing the
+gap).
+
+### Moderation policy, and what "already approved" actually means
+
+Every comment is held for you to look at. That is the **default**, not a rule of the
+software: your dashboard's **Setup** tab has a *Moderation policy* setting with three
+choices, each one keeping what the one above it does.
+
+| | |
+|---|---|
+| **Hold every comment** | The default. Nothing appears on your site until you approve it. |
+| **Trust a commenter you have approved before** | A first comment is held, as always. Once you approve it, that person's later comments go straight onto the page. |
+| **Also publish comments your spam service says are clean** | Everything above, and: when a third-party spam service you connected checks a comment and comes back clean, it is published without waiting for you. |
+
+The second one is not a guess about a comment. It is **your own decision, replayed** —
+the same rule blog comments have worked by for twenty years, and the reason the queue
+stops filling up with people you already know.
+
+**"Approved before" is not an email address.** An email on a Charcha comment is optional
+and nothing verifies it, so anyone can type yours. A commenter counts as returning only
+when the address **and** the network they are commenting from *both* match a comment you
+approved. Someone who knows a regular's email but is somewhere else is held, the same as
+a stranger. That is the whole of what makes this safe to switch on, and the reason the
+email alone is not enough.
+
+Four consequences worth knowing before you choose it:
+
+- **A spam layer's objection always wins.** Trust decides what happens to a comment
+  nothing flagged; it never overrules a layer that did. A regular whose next comment
+  trips the link heuristics, or arrives without a Turnstile token, is still held.
+- **Marking a trusted person's comment as Spam takes the trust away.** Their next comment
+  is held again, and stays held until you approve one of theirs. **Delete** does not do
+  this — only Spam does, because only Spam is a judgement about the commenter.
+- **Trust fades.** The network half is a hash of an IP address, and Charcha deletes those
+  on a retention window. Someone who has not commented for longer than that window is
+  held again. That is deliberate: an address this deployment no longer stores must not
+  keep vouching for whoever holds it now.
+- **It needs `IP_HASH_SECRET`.** Without it no address hash is stored at all, so half the
+  identity does not exist and nobody is ever recognised — the setting reads as on and
+  does nothing. The Setup tab says so where you choose it. It is one of the two secrets
+  the deploy form asks for, so a one-click deploy already has it.
+
+A household or an office sharing one connection can inherit each other's standing, if
+they also know the email address. That is the residual, it is stated rather than glossed,
+and it is the price of having no reader accounts and no cookies.
+
+**The third choice needs a spam service connected, and does nothing without one.** It
+acts only on a service *affirmatively* saying a comment is clean — not on the comment
+merely getting through. So a service that is switched off, that is having an outage, that
+rejected your key or that could not make up its mind publishes nothing, and on a
+deployment with no `AKISMET_API_KEY` the setting behaves exactly like the one above it.
+The Setup tab says so where you choose it.
+
+There is deliberately **no** "publish anything the spam layers allowed" option, and the
+third choice is not that under another name. Those layers mostly measure the *absence* of
+something wrong — an untouched honeypot, more than two seconds spent typing, not too many
+links — so getting through them is not evidence a comment is real, and on a deployment
+that configured nothing it mostly means those layers never ran. A spam service checking
+the text against a real corpus and answering "clean" is a different statement, and it is
+the only one that counts here.
+
+### The addresses you declare, and why a comment can be refused
+
+Charcha checks two things about every comment, and both come from the addresses you have
+declared — **your site's address** on the Setup tab, plus anything under **Allowed
+origins**:
+
+- **Which page posted it.** A page on another address gets
+  `HTTP 403 That origin is not allowed to comment on this site.` This one is a browser
+  rule, so it binds browsers and nothing else.
+- **Which page it says it is on.** A submission reporting an address you have not declared
+  gets `HTTP 403 This site is not accepting comments from that address.` This one binds
+  everything, including a script that sends no browser headers at all — without it, the
+  address stored against a comment is whatever the sender claimed
+  ([#224](https://github.com/withsetu/charcha/issues/224)).
+
+Those settings live in **your Charcha dashboard**. They are **not** Turnstile's
+*Hostname Management* screen — that one governs where the Turnstile widget may render, and
+editing it does nothing here. The two are easy to confuse and have been
+([#57](https://github.com/withsetu/charcha/issues/57)).
+
+Two conveniences, so you do not have to list your site twice:
+
+- **`www` and the apex are one declaration.** Declare `https://example.com` and
+  `https://www.example.com` is accepted too, and the other way round.
+- **Your Worker's own address is always allowed**, without being listed and without
+  anything being written to the database. That is what makes a one-click deploy usable
+  before you have touched any setting.
+
+What is *not* implied is a wildcard: declaring `https://example.com` does not admit
+`https://blog.example.com`. A subdomain you want is a subdomain you list.
+
+**A deployment that has declared no address at all accepts no comments** except for pages
+on the Worker's own address. That is deliberate — Charcha has nothing to check a reported
+address against, and guessing is how a stranger's URL ends up in your moderation queue —
+and the Setup tab carries the loudest notice on the screen while it is the case, naming the
+one setting that fixes it.
+
+## Adding it to a page
+
+```html
+<div id="charcha"></div>
+<script src="https://your-worker.example.workers.dev/embed.js" defer></script>
+```
+
+That is the whole integration. Replace the example address with your own Worker's — the
+one Cloudflare gave you, the same one you signed in to `/admin` on. `embed.js` is 8,242
+bytes gzipped against a 10,240-byte budget — `pnpm check:size` measures it and CI fails
+the build over it. It ships no framework and no Markdown parser, and is served as a
+static asset so it costs your deployment nothing against the Cloudflare request budget.
+[Theming](docs/theming.md) covers the attributes, the class names and the three styling
+modes.
+
+## Documentation
+
+Written for the parts that exist; [docs/](docs/) says plainly what is not built yet.
+
+- [Will this stay free?](docs/free-tier.md) — the free-tier ceilings in plain
+  language, with a worked example
+- [Theming](docs/theming.md) — the HTML and class names Charcha emits, and how to
+  style them
+- [How a URL becomes a comment thread](docs/thread-identity.md) — which parts of a
+  page address decide where a comment lands
+
+Reporting a security problem: [SECURITY.md](SECURITY.md). Please do not open a public
+issue for one — this repository is public and every installation runs in someone
+else's Cloudflare account.
+
+## Status
+
+| | |
+|---|---|
+| v1 plan | [#1](https://github.com/withsetu/charcha/issues/1) |
+| Issues | https://github.com/withsetu/charcha/issues |
+| Site | https://charcha.dev |
+
+## Development
+
+Requires Node 22 (see `.nvmrc`) and pnpm, which `package.json` pins with
+`packageManager` — `corepack enable` is enough to get the right version.
+
+```sh
+pnpm install
+pnpm dev     # wrangler dev, with a local D1
+pnpm check   # types, typecheck, lint, format, tests, embed budget — what CI runs
+```
+
+**pnpm, not npm.** `npm install` here writes a `package-lock.json` that records
+only the platform it ran on: resolving on macOS drops the Linux-only packages CI
+needs, and CI is where that surfaces. `pnpm check` fails if a foreign lockfile
+appears. Background on
+[issue #52](https://github.com/withsetu/charcha/issues/52).
+
+Tests run inside the Workers runtime via `@cloudflare/vitest-pool-workers`, against
+the same bindings the deployed Worker gets.
+
+Set your local secrets in a `.dev.vars` file — it is gitignored, and it is the only
+way to give `wrangler dev` a `CHARCHA_DASHBOARD_PASSWORD` to sign in to the dashboard
+with. Having one does **not** put `pnpm check` into a failing state: both `pnpm types`
+and `pnpm types:check` pass `--env-file scripts/no-secrets.env`, so type generation reads the
+Wrangler config and nothing else. Without that flag, `wrangler types` folds the keys of
+your `.dev.vars` into the generated `Env`, `types:check` reports the committed types as
+stale when nothing about them is, and regenerating writes your own secret names into
+`src/worker-configuration.d.ts` as though they were part of the binding contract
+([#132](https://github.com/withsetu/charcha/issues/132)).
+
+## Troubleshooting a deploy
+
+**Visiting the Worker URL used to answer `Not found`.** It does not any more — `/` says
+Charcha is running, and nothing about your deployment, for the reasons
+[above](#after-it-deploys). If you are on a version that predates it, the deployment was
+almost certainly fine: check `/health` and `/admin`.
+
+**Every comment is refused with `That origin is not allowed to comment on this site.`**
+Your site's address is not one this deployment has been told about. Set it in the dashboard
+at `/admin` — on the Setup tab, or under **Allowed origins** — scheme included, no trailing
+path, one per line. See
+[the addresses you declare](#the-addresses-you-declare-and-why-a-comment-can-be-refused)
+for why this is not Turnstile's hostname list, which is the wrong screen and the one people
+find first.
+
+**Every comment is refused with `This site is not accepting comments from that address.`**
+The same fix, and it is the other of the two checks: this one is about the address the page
+*reported*, so it fires for `curl` and for a browser alike. Your Worker's logs name which
+check fired — look for `"event":"submitted_url_refused"` and its `reason`:
+`nothing-declared` means no address has been set on this deployment at all,
+`undeclared-origin` means the address reported is not one of yours.
+
+**The dashboard returns 401 on every page, including the login.** The deployment
+has no `CHARCHA_DASHBOARD_PASSWORD`. That is the designed behaviour rather than a
+bug — an unconfigured dashboard is a locked one, not an open one — but it is
+indistinguishable from a wrong password by design, because a login endpoint that
+tells you which of the two it was tells an attacker whether the door exists. The
+Worker's logs say which: look for a line with `guard: dashboard-password`. It is
+emitted **once per isolate**, not once per request, so if you started tailing logs
+after the first failed request you may have to wait for a cold start or redeploy to
+see it. The fix is `pnpm wrangler secret put CHARCHA_DASHBOARD_PASSWORD`, or the
+same field under
+**Settings → Variables and Secrets** in the dashboard. Comments arriving in the
+meantime are not lost; they are held in the queue.
+
+**Every request fails, and the log says `no such table: comments`.** The database
+exists and the migrations did not run. `/health` says so without needing the logs —
+`{"status":"degraded","database":"unmigrated"}`. Read the build log for the
+`wrangler d1 migrations apply DB --remote` line that `pnpm run deploy` runs before
+deploying, and note that this failure is quieter than it should be: `wrangler d1
+migrations apply` is known to exit non-zero with no useful output when the token it
+is using lacks D1 permissions
+([workers-sdk#5077](https://github.com/cloudflare/workers-sdk/issues/5077),
+[wrangler-action#221](https://github.com/cloudflare/wrangler-action/issues/221)).
+That is a live possibility here, not a theoretical one: the API token Workers Builds
+creates for itself is documented as carrying Account Settings (read), Workers Scripts
+(edit), Workers KV Storage (edit) and Workers R2 Storage (edit) — **D1 is not on that
+list**
+([build configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/),
+checked 2026-07-25). If the migration step is what failed, add **D1 (edit)** to that
+token under **My Profile → API Tokens**, or apply the migrations once from a
+terminal with `pnpm db:migrate:remote` and redeploy. Migrations run before the
+deploy specifically so this shows up as a red build rather than as a live Worker
+that 500s.
+
+**The build fails on `pnpm deploy` with pnpm's own usage text.** Cloudflare
+pre-populates the deploy command from the `deploy` script in `package.json`, and
+`pnpm deploy` is a built-in pnpm command — `pnpm deploy --help` prints
+`Usage: pnpm --filter=<deployed project name> deploy <target directory>`, checked
+against pnpm 10.34.5 — which shadows the script rather than running it. Set the
+deploy command to `pnpm run deploy` (or `npm run deploy`) under **Settings → Build**.
+
+**The deploy fails mentioning the rate limiting binding.** Charcha uses the
+[Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
+to bound brute-force attempts against the dashboard login. It is GA, needs no
+provisioning, and **whether it is available on the Workers Free plan is documented
+nowhere** — not on the binding page, not on the
+[bindings index](https://developers.cloudflare.com/workers/runtime-apis/bindings/),
+and not in the Free-vs-Paid table on the
+[pricing page](https://developers.cloudflare.com/workers/platform/pricing/), which
+covers ten other products and does not mention rate limiting at all (all checked
+2026-07-25). We are recording that we do not know rather than guessing;
+[#119](https://github.com/withsetu/charcha/issues/119) is the issue, and the first
+real deploy settles it. **If your deploy is what settles it, please say so on that
+issue** — you will have found out something Cloudflare's documentation does not say.
+
+There is no good workaround to offer you yet, and pretending otherwise would be
+worse than saying so. Deleting the `ratelimits` block from `wrangler.jsonc` makes the
+deploy succeed, but the login throttle then refuses **every** login attempt rather
+than allowing them unguarded, so the dashboard stays shut. Comments are still
+accepted and still queued the whole time, so nothing is lost while
+[#124](https://github.com/withsetu/charcha/issues/124) picks a throttle that does not
+depend on the binding. The obvious candidate is closed off, and the reason is worth
+knowing before anyone suggests it: the Cache API is documented as "not currently
+available" for Workers behind Cloudflare Access, and its availability sentence lists
+custom domains and `*.pages.dev` while omitting `*.workers.dev`
+([Cache](https://developers.cloudflare.com/workers/runtime-apis/cache/), checked
+2026-07-25). The second half is an inference rather than a statement, and it is the
+wrong thing to bet a security guard on either way — a counter that silently counts
+nothing is worse than no counter, because it looks like one.
+
+**pnpm version mismatch.** `pnpm-lock.yaml` is written by the pnpm that
+`package.json` pins with `packageManager`, but a Cloudflare deploy does not use
+that pin — Workers Builds installs the pnpm its build image ships, and there is
+no repo-side way to change it. Both are on pnpm 10.x writing
+`lockfileVersion: '9.0'`, so this is expected to be fine. It is written down
+because if it ever is not, the build does not go red. `pnpm check` asserts both
+halves — that the pin stays on a major the image runs, and that the lockfile
+stays in a format that major writes — so this repository cannot drift off the
+image quietly. What that gate cannot see is the image moving underneath it,
+which is why the rest of this section exists. pnpm **ignores** a
+lockfile it considers incompatible and resolves dependencies fresh, so a green
+build can have installed a tree nobody locked or tested. Read the build log for:
+
+```
+ WARN  Ignoring not compatible lockfile at /path/to/pnpm-lock.yaml
+```
+
+The variants that do fail the build, listed so they are greppable:
+
+```
+ERR_PNPM_OUTDATED_LOCKFILE
+ERR_PNPM_FROZEN_LOCKFILE_WITH_OUTDATED_LOCKFILE
+  Cannot perform a frozen installation because the lockfile needs updates
+Cannot install with "frozen-lockfile" because pnpm-lock.yaml is absent
+```
+
+The fix for any of them is to set the build's pnpm version explicitly: in the
+Cloudflare dashboard, **Settings → Build → Build Variables and Secrets**, add
+`PNPM_VERSION` with the version from `packageManager`. That variable is the only
+lever pnpm has there — there is no `.nvmrc` equivalent for it, and build
+configuration in `wrangler.jsonc` is not read. This particular failure has not been
+hit on a real build; it is a contingency written before it is needed rather than
+after.
+
+## License
+
+MIT

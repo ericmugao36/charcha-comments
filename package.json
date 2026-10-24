@@ -1,0 +1,111 @@
+{
+  "name": "charcha-comments",
+  "version": "0.0.1",
+  "description": "Self-hosted comments for static sites. Deploys to your own Cloudflare account.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "keywords": [
+    "comments",
+    "static-site",
+    "cloudflare",
+    "workers",
+    "ssg",
+    "self-hosted"
+  ],
+  "homepage": "https://charcha.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/withsetu/charcha.git"
+  },
+  "bugs": {
+    "url": "https://github.com/withsetu/charcha/issues"
+  },
+  "license": "MIT",
+  "author": "Mayank Gupta",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "types": "wrangler types ./src/worker-configuration.d.ts --env-file scripts/no-secrets.env",
+    "types:check": "wrangler types ./src/worker-configuration.d.ts --env-file scripts/no-secrets.env --check",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/embed/tsconfig.json && tsc --noEmit -p src/dashboard/tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p test/dom/tsconfig.json && tsc --noEmit -p test/dashboard/tsconfig.json",
+    "build": "pnpm build:embed && pnpm build:dashboard",
+    "build:embed": "esbuild src/embed/index.ts --bundle --minify --format=iife --target=es2022 --outfile=public/embed.js",
+    "build:dashboard": "esbuild src/dashboard/index.tsx --bundle --minify --format=esm --target=es2022 --platform=browser --jsx=automatic --define:process.env.NODE_ENV='\"production\"' --outfile=public/admin/app.js && tailwindcss --input src/dashboard/styles.css --output public/admin/app.css --minify",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "check:size": "node scripts/bundle-size.mjs",
+    "check:lockfile": "node scripts/lockfile-guard.mjs",
+    "check:licences": "node scripts/licence-policy.mjs",
+    "check:actions": "node scripts/actions-pinned.mjs",
+    "check:actions:upstream": "node scripts/actions-upstream.mjs",
+    "check:deploy": "node scripts/deploy-config.mjs",
+    "check:audit": "pnpm audit --prod --audit-level=low && pnpm audit --audit-level=high",
+    "check": "pnpm types:check && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm build && pnpm check:size && pnpm check:lockfile && pnpm check:licences && pnpm check:actions && pnpm check:deploy && pnpm check:audit"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CHARCHA_DASHBOARD_PASSWORD": {
+        "description": "**Required, and at least 15 characters — this is the only credential for your moderation dashboard and it has no second factor.** Generate one with `openssl rand -base64 24`, which gives you 32, and keep it in a password manager: there is no account to create, no second user and no reset, and anyone holding it can approve, hide and delete every comment on your site. Nothing on this form will check the length — it cannot — so it is worth pasting a generated value rather than typing one; the dashboard's Setup tab will tell you later if this one was short, and [the README](https://github.com/withsetu/charcha#how-long-the-dashboard-password-should-be) says why nothing ever refuses it. Left empty, the dashboard refuses every request including its own login, and comments arriving on your site cannot be moderated. Turnstile, email notifications and the rest are **not** asked for here — they are off until you switch them on afterwards, and the [README](https://github.com/withsetu/charcha#turning-on-the-optional-features) walks through each. The bot check is the one of those worth doing, and it takes two values rather than one: a secret key on the Worker and a sitekey on your own page. The `IP_HASH_SECRET` field on this form says why it could not be asked for here."
+      },
+      "IP_HASH_SECRET": {
+        "description": "**Required, and any long random string will do — `openssl rand -hex 32` if you have a terminal open.** This is the key that turns a commenter's IP address into the identifier the per-IP spam rate limit counts. It is an HMAC key, not a credential to look up anywhere: nothing has to recognise it, it never leaves your Worker, and no IP address is stored without it. Use a random one — anyone who guessed it and also had a copy of your database could turn the stored hashes back into IP addresses. **One spam layer is not on this form, and it is the one worth going out of your way for: [Turnstile](https://developers.cloudflare.com/turnstile/get-started/).** Every other check that looks at a comment measures the absence of something wrong, and a script written against the form passes all of them; this rate limit bounds how many arrive rather than whether any is real. Turnstile is the only layer that asks a commenter's browser to prove itself, and Cloudflare's free plan is unlimited. It is missing here because this form requires a value in every field, and a Turnstile secret invented to get past a required field matches no widget — which would hold every comment on your site for review. So turn it on after deploying, and turn on **both** of a widget's keys: the secret key goes on the Worker and the sitekey goes on your own page as `data-turnstile-sitekey`. Setting only the Worker's half is the expensive mistake, because it holds every comment for review; setting only the sitekey costs nothing. [The README](https://github.com/withsetu/charcha#turning-on-the-optional-features) has both steps."
+      }
+    }
+  },
+  "dependencies": {
+    "hono": "^4.12.34",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/cli": "^4.3.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "happy-dom": "^20.11.1",
+    "lucide-react": "^1.26.0",
+    "prettier": "^3.9.6",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "@parcel/watcher",
+      "esbuild",
+      "workerd"
+    ],
+    "overrides": {
+      "brace-expansion@<5.0.9": ">=5.0.9",
+      "undici@<7.29.0": ">=7.29.0 <8.0.0",
+      "postcss@<8.5.23": ">=8.5.23"
+    }
+  }
+}
